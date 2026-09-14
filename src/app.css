@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+	* {
+		@apply border-hair;
+	}
+	body {
+		@apply min-h-screen;
+	}
+	:focus-visible {
+		outline: 2px solid theme('colors.gold.DEFAULT');
+		outline-offset: 2px;
+	}
+}
+
+@layer components {
+	/* Perforated divider — a nod to statement/ticket stubs, used once
+	   between the balance band and quick actions on Home. */
+	.perforated {
+		position: relative;
+		height: 1px;
+		background: repeating-linear-gradient(
+			90deg,
+			theme('colors.hair') 0 8px,
+			transparent 8px 14px
+		);
+	}
+	.perforated::before,
+	.perforated::after {
+		content: '';
+		position: absolute;
+		top: 50%;
+		width: 18px;
+		height: 18px;
+		background: theme('colors.ink');
+		border-radius: 999px;
+		transform: translateY(-50%);
+	}
+	.perforated::before {
+		left: -25px;
+	}
+	.perforated::after {
+		right: -25px;
+	}
+
+	.status-dot {
+		@apply inline-block h-2 w-2 rounded-full;
+	}
+	.status-successful {
+		@apply bg-emerald-bright;
+	}
+	.status-pending {
+		@apply bg-pending;
+	}
+	.status-failed {
+		@apply bg-danger;
+	}
+	.status-reversed {
+		@apply bg-reversed;
+	}
+}
