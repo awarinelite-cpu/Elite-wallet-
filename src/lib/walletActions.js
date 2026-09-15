@@ -46,6 +46,31 @@ export async function withdrawWallet(amount, bankAccountLast4) {
 	});
 }
 
+/**
+ * Sends a real payout to a bank account via Paystack Transfers. Debits
+ * the wallet immediately (status 'pending'); final status arrives via
+ * the webhook, or occasionally immediately if Paystack resolves it inline.
+ */
+export async function withdrawToBank({ amount, bankName, bankCode, accountNumber, accountName }) {
+	const {
+		data: { session }
+	} = await supabase.auth.getSession();
+	if (!session) return { error: { message: 'Not authenticated' } };
+
+	const res = await fetch('/api/paystack/withdraw', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${session.access_token}`
+		},
+		body: JSON.stringify({ amount, bankName, bankCode, accountNumber, accountName })
+	});
+	const payload = await res.json();
+	if (!res.ok) return { error: { message: payload.error ?? 'Withdrawal could not be started.' } };
+
+	return { data: payload.transaction };
+}
+
 export async function transferToBank({ amount, bankName, accountNumber, accountName }) {
 	return supabase.rpc('transfer_to_bank', {
 		p_amount: amount,

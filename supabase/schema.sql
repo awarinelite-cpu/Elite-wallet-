@@ -58,11 +58,14 @@ create table if not exists public.beneficiaries (
 	user_id uuid not null references auth.users (id) on delete cascade,
 	type text not null default 'bank' check (type in ('bank', 'wallet')),
 	bank_name text,
+	bank_code text,
 	account_number text,
 	account_name text,
 	wallet_tag text,
 	created_at timestamptz not null default now()
 );
+
+alter table public.beneficiaries add column if not exists bank_code text;
 
 create table if not exists public.spend_records (
 	id uuid primary key default gen_random_uuid(),
@@ -488,6 +491,168 @@ begin
 	)
 	returning * into v_tx;
 
+	return v_tx;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- Paystack payouts (bank withdrawals)
+-- The debit happens immediately (status 'pending') so the balance can't be
+-- double-spent while the transfer is in flight at Paystack. Resolution
+-- (success/failure) comes back later — either synchronously in the same
+-- request if Paystack rejects it immediately, or via resolve_transfer_webhook
+-- once Paystack's webhook confirms the outcome.
+-- ----------------------------------------------------------------------------
+
+create or replace function public.debit_wallet_for_transfer(
+	p_amount numeric,
+	p_bank_name text,
+	p_account_number text,
+	p_account_name text
+)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_user uuid := auth.uid();
+	v_balance numeric;
+	v_fee numeric := 25.00;
+	v_tx public.transactions;
+begin
+	if v_user is null then
+		raise exception 'Not authenticated';
+	end if;
+	if p_amount is null or p_amount <= 0 then
+		raise exception 'Amount must be greater than zero';
+	end if;
+
+	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if v_balance < p_amount then
+		raise exception 'Insufficient wallet balance';
+	end if;
+
+	update public.wallets
+		set balance = balance - p_amount, updated_at = now()
+		where user_id = v_user;
+
+	insert into public.transactions (user_id, type, amount, fee, status, reference, description, counterparty)
+	values (
+		v_user, 'transfer_bank', p_amount, v_fee, 'pending', public.generate_reference(),
+		'Transfer to ' || p_bank_name,
+		p_account_name || ' · ' || p_bank_name || ' (••' || right(p_account_number, 4) || ')'
+	)
+	returning * into v_tx;
+
+	return v_tx;
+end;
+$$;
+
+-- Self-service reversal — used only synchronously, in the same request that
+-- did the debit, when Paystack rejects the transfer outright (bad recipient,
+-- etc). Scoped to auth.uid() = user_id, so it can only ever undo the
+-- caller's own pending debit — safe to leave callable by any authenticated
+-- user.
+create or replace function public.reverse_wallet_debit(p_reference text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_user uuid := auth.uid();
+	v_tx public.transactions;
+begin
+	if v_user is null then
+		raise exception 'Not authenticated';
+	end if;
+
+	select * into v_tx from public.transactions
+		where reference = p_reference and user_id = v_user and status = 'pending'
+		for update;
+	if not found then
+		raise exception 'No matching pending transaction';
+	end if;
+
+	update public.transactions set status = 'failed' where id = v_tx.id returning * into v_tx;
+	update public.wallets set balance = balance + v_tx.amount, updated_at = now() where user_id = v_user;
+
+	return v_tx;
+end;
+$$;
+
+-- Webhook resolver — deliberately does NOT check auth.uid(), because
+-- Paystack's webhook call has no user session at all. That's exactly why
+-- it must never be reachable by a normal user: the grants below restrict
+-- it to the service_role, which only the webhook server route holds.
+create or replace function public.resolve_transfer_webhook(p_reference text, p_status text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_tx public.transactions;
+begin
+	select * into v_tx from public.transactions
+		where reference = p_reference and type = 'transfer_bank'
+		for update;
+	if not found then
+		raise exception 'Unknown transfer reference: %', p_reference;
+	end if;
+
+	-- Already resolved (duplicate webhook delivery) — no-op.
+	if v_tx.status <> 'pending' then
+		return v_tx;
+	end if;
+
+	if p_status = 'successful' then
+		update public.transactions set status = 'successful' where id = v_tx.id returning * into v_tx;
+	else
+		update public.transactions set status = p_status where id = v_tx.id;
+		update public.wallets
+			set balance = balance + v_tx.amount, updated_at = now()
+			where user_id = v_tx.user_id;
+		select * into v_tx from public.transactions where id = v_tx.id;
+	end if;
+
+	return v_tx;
+end;
+$$;
+
+revoke all on function public.resolve_transfer_webhook(text, text) from public;
+revoke all on function public.resolve_transfer_webhook(text, text) from anon, authenticated;
+grant execute on function public.resolve_transfer_webhook(text, text) to service_role;
+
+-- Same-request success resolver — for the rare case Paystack returns a
+-- final 'success' status immediately instead of async via webhook. Scoped
+-- to auth.uid() = user_id like reverse_wallet_debit, so it's safe to grant
+-- to authenticated users generally: it can only mark the caller's own
+-- pending transfer as successful, never touch anyone else's.
+create or replace function public.resolve_own_transfer_success(p_reference text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_user uuid := auth.uid();
+	v_tx public.transactions;
+begin
+	if v_user is null then
+		raise exception 'Not authenticated';
+	end if;
+
+	select * into v_tx from public.transactions
+		where reference = p_reference and user_id = v_user and status = 'pending'
+		for update;
+	if not found then
+		select * into v_tx from public.transactions where reference = p_reference and user_id = v_user;
+		return v_tx; -- already resolved, e.g. webhook beat us to it
+	end if;
+
+	update public.transactions set status = 'successful' where id = v_tx.id returning * into v_tx;
 	return v_tx;
 end;
 $$;

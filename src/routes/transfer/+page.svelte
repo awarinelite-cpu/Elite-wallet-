@@ -1,7 +1,8 @@
 <script>
+	import { onMount } from 'svelte';
 	import { invalidateAll } from '$app/navigation';
 	import { formatNaira, formatDate, formatTime } from '$lib/format';
-	import { transferToBank, transferToWallet } from '$lib/walletActions';
+	import { withdrawToBank, transferToWallet } from '$lib/walletActions';
 	import { supabase } from '$lib/supabaseClient';
 
 	export let data;
@@ -9,9 +10,12 @@
 	let tab = 'bank'; // 'bank' | 'wallet' | 'beneficiaries'
 
 	// Bank transfer form
-	let bankName = '';
+	let banks = []; // [{ name, code }]
+	let bankCode = '';
 	let accountNumber = '';
-	let accountName = '';
+	let resolvedAccountName = ''; // set only by a successful resolve — the source of truth sent to Paystack
+	let resolving = false;
+	let resolveError = '';
 	let bankAmount = '';
 	let saveBeneficiary = false;
 
@@ -21,33 +25,62 @@
 
 	let loading = false;
 	let error = '';
-	let receipt = null; // holds the last successful transfer for the receipt view
+	let receipt = null; // holds the last transfer for the receipt view
 
-	const BANKS = [
-		'Access Bank', 'GTBank', 'Zenith Bank', 'UBA', 'First Bank',
-		'Fidelity Bank', 'Union Bank', 'Sterling Bank', 'Wema Bank', 'Opay', 'Moniepoint', 'Kuda'
-	];
+	$: selectedBankName = banks.find((b) => b.code === bankCode)?.name ?? '';
+
+	onMount(async () => {
+		const res = await fetch('/api/paystack/banks');
+		const payload = await res.json();
+		if (res.ok) banks = payload.banks;
+	});
+
+	async function resolveAccount() {
+		resolvedAccountName = '';
+		resolveError = '';
+		if (!bankCode || accountNumber.length !== 10) return;
+
+		resolving = true;
+		const {
+			data: { session }
+		} = await supabase.auth.getSession();
+		const res = await fetch(
+			`/api/paystack/resolve-account?account_number=${accountNumber}&bank_code=${bankCode}`,
+			{ headers: { Authorization: `Bearer ${session.access_token}` } }
+		);
+		const payload = await res.json();
+		resolving = false;
+
+		if (!res.ok) {
+			resolveError = payload.error ?? 'Could not verify that account.';
+			return;
+		}
+		resolvedAccountName = payload.account_name;
+	}
 
 	function useBeneficiary(b) {
 		tab = 'bank';
-		bankName = b.bank_name;
+		bankCode = b.bank_code;
 		accountNumber = b.account_number;
-		accountName = b.account_name;
+		resolvedAccountName = b.account_name;
+		resolveError = '';
 	}
 
 	async function submitBankTransfer() {
 		error = '';
 		const amt = Number(bankAmount);
 		if (!amt || amt <= 0) return (error = 'Enter a valid amount.');
-		if (!bankName || accountNumber.length < 10) return (error = 'Enter a valid bank and account number.');
+		if (!bankCode || accountNumber.length !== 10) return (error = 'Select a bank and enter a valid account number.');
+		if (!resolvedAccountName) return (error = 'Account could not be verified — check the details and try again.');
 		if (amt > (data.wallet?.balance ?? 0)) return (error = 'Insufficient wallet balance.');
 
 		loading = true;
-		const { data: result, error: err } = await transferToBank({
+		const { data: tx, error: err } = await withdrawToBank({
 			amount: amt,
-			bankName,
+			bankName: selectedBankName,
+			bankCode,
 			accountNumber,
-			accountName: accountName || 'Beneficiary'
+			accountName: resolvedAccountName
 		});
 		loading = false;
 		if (err) return (error = err.message);
@@ -55,24 +88,28 @@
 		if (saveBeneficiary) {
 			await supabase.from('beneficiaries').insert({
 				type: 'bank',
-				bank_name: bankName,
+				bank_name: selectedBankName,
+				bank_code: bankCode,
 				account_number: accountNumber,
-				account_name: accountName || 'Beneficiary'
+				account_name: resolvedAccountName
 			});
 		}
 
 		receipt = {
 			type: 'Bank Transfer',
 			amount: amt,
-			to: `${accountName || 'Beneficiary'} · ${bankName} (••${accountNumber.slice(-4)})`,
-			reference: result?.[0]?.reference ?? result?.reference,
+			to: `${resolvedAccountName} · ${selectedBankName} (••${accountNumber.slice(-4)})`,
+			reference: tx?.reference,
+			status: tx?.status ?? 'pending',
 			time: new Date().toISOString()
 		};
 		bankAmount = '';
 		accountNumber = '';
-		accountName = '';
+		bankCode = '';
+		resolvedAccountName = '';
 		await invalidateAll();
 	}
+
 
 	async function submitWalletTransfer() {
 		error = '';
@@ -116,7 +153,7 @@
 	<section class="px-5 pt-6">
 		<div class="rounded-card border border-hair bg-surface p-5 text-center">
 			<div class="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-emerald-dim text-xl">✓</div>
-			<p class="text-sm text-ash-muted">{receipt.type} Successful</p>
+			<p class="text-sm text-ash-muted">{receipt.type} {receipt.status === 'pending' ? 'Initiated' : 'Successful'}</p>
 			<p class="font-display mt-1 text-2xl font-semibold text-ash">{formatNaira(receipt.amount)}</p>
 
 			<div class="mt-5 space-y-2.5 rounded-card bg-surface2 p-4 text-left text-sm">
@@ -124,7 +161,14 @@
 				<div class="flex justify-between"><span class="text-ash-faint">Reference</span><span class="text-ash">{receipt.reference ?? '—'}</span></div>
 				<div class="flex justify-between"><span class="text-ash-faint">Date</span><span class="text-ash">{formatDate(receipt.time)}</span></div>
 				<div class="flex justify-between"><span class="text-ash-faint">Time</span><span class="text-ash">{formatTime(receipt.time)}</span></div>
-				<div class="flex justify-between"><span class="text-ash-faint">Status</span><span class="text-emerald-bright">🟢 Successful</span></div>
+				<div class="flex justify-between">
+					<span class="text-ash-faint">Status</span>
+					{#if receipt.status === 'pending'}
+						<span class="text-gold">🟡 Processing</span>
+					{:else}
+						<span class="text-emerald-bright">🟢 Successful</span>
+					{/if}
+				</div>
 			</div>
 
 			<button on:click={newTransfer} class="mt-5 w-full rounded-card bg-emerald py-3 text-sm font-semibold text-ink">
@@ -155,18 +199,42 @@
 			<div class="space-y-3">
 				<div>
 					<label for="bank" class="mb-1.5 block text-xs font-medium text-ash-muted">Bank</label>
-					<select id="bank" bind:value={bankName} class="w-full rounded-card border border-hair bg-surface px-4 py-3 text-sm text-ash outline-none focus:border-emerald">
+					<select
+						id="bank"
+						bind:value={bankCode}
+						on:change={resolveAccount}
+						class="w-full rounded-card border border-hair bg-surface px-4 py-3 text-sm text-ash outline-none focus:border-emerald"
+					>
 						<option value="" disabled selected>Select a bank</option>
-						{#each BANKS as b}<option value={b}>{b}</option>{/each}
+						{#each banks as b}<option value={b.code}>{b.name}</option>{/each}
 					</select>
 				</div>
 				<div>
 					<label for="accno" class="mb-1.5 block text-xs font-medium text-ash-muted">Account number</label>
-					<input id="accno" type="text" inputmode="numeric" maxlength="10" bind:value={accountNumber} placeholder="0123456789" class="w-full rounded-card border border-hair bg-surface px-4 py-3 text-sm text-ash outline-none focus:border-emerald" />
+					<input
+						id="accno"
+						type="text"
+						inputmode="numeric"
+						maxlength="10"
+						bind:value={accountNumber}
+						on:blur={resolveAccount}
+						placeholder="0123456789"
+						class="w-full rounded-card border border-hair bg-surface px-4 py-3 text-sm text-ash outline-none focus:border-emerald"
+					/>
 				</div>
 				<div>
-					<label for="accname" class="mb-1.5 block text-xs font-medium text-ash-muted">Account name (optional)</label>
-					<input id="accname" type="text" bind:value={accountName} placeholder="Resolved automatically in production" class="w-full rounded-card border border-hair bg-surface px-4 py-3 text-sm text-ash outline-none focus:border-emerald" />
+					<span class="mb-1.5 block text-xs font-medium text-ash-muted">Account name</span>
+					<div class="w-full rounded-card border border-hair bg-surface2 px-4 py-3 text-sm">
+						{#if resolving}
+							<span class="text-ash-faint">Verifying…</span>
+						{:else if resolvedAccountName}
+							<span class="text-emerald-bright">✓ {resolvedAccountName}</span>
+						{:else if resolveError}
+							<span class="text-danger">{resolveError}</span>
+						{:else}
+							<span class="text-ash-faint">Select a bank and account number to verify</span>
+						{/if}
+					</div>
 				</div>
 				<div>
 					<label for="bamt" class="mb-1.5 block text-xs font-medium text-ash-muted">Amount (₦)</label>
@@ -176,7 +244,11 @@
 					<input type="checkbox" bind:checked={saveBeneficiary} class="h-4 w-4 rounded border-hair bg-surface" />
 					Save as beneficiary
 				</label>
-				<button on:click={submitBankTransfer} disabled={loading} class="w-full rounded-card bg-emerald py-3.5 text-sm font-semibold text-ink disabled:opacity-60">
+				<button
+					on:click={submitBankTransfer}
+					disabled={loading || resolving || !resolvedAccountName}
+					class="w-full rounded-card bg-emerald py-3.5 text-sm font-semibold text-ink disabled:opacity-60"
+				>
 					{loading ? 'Sending…' : 'Send Transfer'}
 				</button>
 			</div>
