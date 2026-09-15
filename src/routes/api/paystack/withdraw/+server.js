@@ -48,45 +48,53 @@ export async function POST({ request }) {
 		return json({ error: message }, { status });
 	}
 
-	// 2. Create (or reuse) a Paystack transfer recipient for this account.
-	const recipientRes = await fetch('https://api.paystack.co/transferrecipient', {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({
-			type: 'nuban',
-			name: accountName,
-			account_number: accountNumber,
-			bank_code: bankCode,
-			currency: 'NGN'
-		})
-	});
-	const recipientPayload = await recipientRes.json();
-	if (!recipientRes.ok || !recipientPayload.status) {
-		return reverseAndFail(recipientPayload.message ?? 'Could not verify that recipient.', 400);
-	}
+	let recipientPayload, transferPayload;
+	try {
+		// 2. Create (or reuse) a Paystack transfer recipient for this account.
+		const recipientRes = await fetch('https://api.paystack.co/transferrecipient', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				type: 'nuban',
+				name: accountName,
+				account_number: accountNumber,
+				bank_code: bankCode,
+				currency: 'NGN'
+			})
+		});
+		recipientPayload = await recipientRes.json();
+		if (!recipientRes.ok || !recipientPayload.status) {
+			console.error('[paystack:withdraw] recipient creation rejected', recipientRes.status, recipientPayload);
+			return reverseAndFail(recipientPayload.message ?? 'Could not verify that recipient.', 400);
+		}
 
-	// 3. Initiate the transfer, tagged with our own reference so the
-	// webhook can find its way back to this exact transaction.
-	const transferRes = await fetch('https://api.paystack.co/transfer', {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({
-			source: 'balance',
-			amount: Math.round(naira * 100),
-			recipient: recipientPayload.data.recipient_code,
-			reason: 'Elite Wallet withdrawal',
-			reference: tx.reference
-		})
-	});
-	const transferPayload = await transferRes.json();
-	if (!transferRes.ok || !transferPayload.status) {
-		return reverseAndFail(transferPayload.message ?? 'Transfer could not be started.', 502);
+		// 3. Initiate the transfer, tagged with our own reference so the
+		// webhook can find its way back to this exact transaction.
+		const transferRes = await fetch('https://api.paystack.co/transfer', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				source: 'balance',
+				amount: Math.round(naira * 100),
+				recipient: recipientPayload.data.recipient_code,
+				reason: 'Elite Wallet withdrawal',
+				reference: tx.reference
+			})
+		});
+		transferPayload = await transferRes.json();
+		if (!transferRes.ok || !transferPayload.status) {
+			console.error('[paystack:withdraw] transfer rejected', transferRes.status, transferPayload);
+			return reverseAndFail(transferPayload.message ?? 'Transfer could not be started.', 502);
+		}
+	} catch (err) {
+		console.error('[paystack:withdraw] Request to Paystack threw', err);
+		return reverseAndFail(`Transfer could not be started: ${err.message}`, 502);
 	}
 
 	// Some Paystack accounts (or `source: balance` with OTP fully disabled)

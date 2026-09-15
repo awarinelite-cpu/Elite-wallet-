@@ -30,14 +30,21 @@ export async function GET({ url, request }) {
 	} = await supabase.auth.getUser();
 	if (userError || !user) return json({ error: 'Not authenticated' }, { status: 401 });
 
-	const verifyRes = await fetch(
-		`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
-		{ headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
-	);
-	const verifyPayload = await verifyRes.json();
+	let verifyPayload;
+	try {
+		const verifyRes = await fetch(
+			`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
+			{ headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
+		);
+		verifyPayload = await verifyRes.json();
 
-	if (!verifyRes.ok || !verifyPayload.status) {
-		return json({ error: verifyPayload.message ?? 'Verification failed.' }, { status: 502 });
+		if (!verifyRes.ok || !verifyPayload.status) {
+			console.error('[paystack:verify] Paystack rejected the request', verifyRes.status, verifyPayload);
+			return json({ error: verifyPayload.message ?? 'Verification failed.' }, { status: 502 });
+		}
+	} catch (err) {
+		console.error('[paystack:verify] Request to Paystack threw', err);
+		return json({ error: `Verification failed: ${err.message}` }, { status: 502 });
 	}
 
 	const tx = verifyPayload.data;

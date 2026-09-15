@@ -27,27 +27,33 @@ export async function POST({ request, url }) {
 		return json({ error: 'Enter a valid amount.' }, { status: 400 });
 	}
 
-	const psRes = await fetch('https://api.paystack.co/transaction/initialize', {
-		method: 'POST',
-		headers: {
-			Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-			'Content-Type': 'application/json'
-		},
-		body: JSON.stringify({
-			email: user.email,
-			amount: Math.round(naira * 100), // Paystack expects kobo
-			callback_url: `${url.origin}/paystack/callback`,
-			metadata: { user_id: user.id }
-		})
-	});
-	const payload = await psRes.json();
+	try {
+		const psRes = await fetch('https://api.paystack.co/transaction/initialize', {
+			method: 'POST',
+			headers: {
+				Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify({
+				email: user.email,
+				amount: Math.round(naira * 100), // Paystack expects kobo
+				callback_url: `${url.origin}/paystack/callback`,
+				metadata: { user_id: user.id }
+			})
+		});
+		const payload = await psRes.json();
 
-	if (!psRes.ok || !payload.status) {
-		return json({ error: payload.message ?? 'Could not start payment.' }, { status: 502 });
+		if (!psRes.ok || !payload.status) {
+			console.error('[paystack:initialize] Paystack rejected the request', psRes.status, payload);
+			return json({ error: payload.message ?? 'Could not start payment.' }, { status: 502 });
+		}
+
+		return json({
+			authorization_url: payload.data.authorization_url,
+			reference: payload.data.reference
+		});
+	} catch (err) {
+		console.error('[paystack:initialize] Request to Paystack threw', err);
+		return json({ error: `Could not start payment: ${err.message}` }, { status: 502 });
 	}
-
-	return json({
-		authorization_url: payload.data.authorization_url,
-		reference: payload.data.reference
-	});
 }

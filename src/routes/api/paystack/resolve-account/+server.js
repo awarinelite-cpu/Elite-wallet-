@@ -27,14 +27,20 @@ export async function GET({ url, request }) {
 		return json({ error: 'Missing account_number or bank_code' }, { status: 400 });
 	}
 
-	const res = await fetch(
-		`https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
-		{ headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
-	);
-	const payload = await res.json();
-	if (!res.ok || !payload.status) {
-		return json({ error: payload.message ?? 'Could not verify that account.' }, { status: 400 });
-	}
+	try {
+		const res = await fetch(
+			`https://api.paystack.co/bank/resolve?account_number=${encodeURIComponent(accountNumber)}&bank_code=${encodeURIComponent(bankCode)}`,
+			{ headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` } }
+		);
+		const payload = await res.json();
+		if (!res.ok || !payload.status) {
+			console.error('[paystack:resolve-account] Paystack rejected the request', res.status, payload);
+			return json({ error: payload.message ?? 'Could not verify that account.' }, { status: 400 });
+		}
 
-	return json({ account_name: payload.data.account_name });
+		return json({ account_name: payload.data.account_name });
+	} catch (err) {
+		console.error('[paystack:resolve-account] Request to Paystack threw', err);
+		return json({ error: `Could not verify that account: ${err.message}` }, { status: 400 });
+	}
 }
