@@ -12,6 +12,33 @@ export async function fundWallet(amount) {
 	return supabase.rpc('fund_wallet', { p_amount: amount });
 }
 
+/**
+ * Starts a real Paystack payment for the given naira amount. Returns
+ * { data: { authorization_url, reference } } on success — redirect the
+ * browser to authorization_url to hand off to Paystack's checkout.
+ * The wallet isn't credited here; that happens once /paystack/callback
+ * verifies the payment after the user returns from checkout.
+ */
+export async function initiatePaystackFunding(amount) {
+	const {
+		data: { session }
+	} = await supabase.auth.getSession();
+	if (!session) return { error: { message: 'Not authenticated' } };
+
+	const res = await fetch('/api/paystack/initialize', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${session.access_token}`
+		},
+		body: JSON.stringify({ amount })
+	});
+	const payload = await res.json();
+	if (!res.ok) return { error: { message: payload.error ?? 'Could not start payment.' } };
+
+	return { data: payload };
+}
+
 export async function withdrawWallet(amount, bankAccountLast4) {
 	return supabase.rpc('withdraw_wallet', {
 		p_amount: amount,

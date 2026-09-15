@@ -1,7 +1,7 @@
 <script>
 	import { invalidateAll } from '$app/navigation';
 	import { formatNaira } from '$lib/format';
-	import { fundWallet, withdrawWallet } from '$lib/walletActions';
+	import { initiatePaystackFunding, withdrawWallet } from '$lib/walletActions';
 	import TransactionRow from '$lib/components/TransactionRow.svelte';
 
 	export let data;
@@ -43,14 +43,27 @@
 			return;
 		}
 		loading = true;
-		const { error: err } =
-			mode === 'fund' ? await fundWallet(numAmount) : await withdrawWallet(numAmount, accountLast4);
+
+		if (mode === 'fund') {
+			const { data: payment, error: err } = await initiatePaystackFunding(numAmount);
+			if (err) {
+				loading = false;
+				error = err.message;
+				return;
+			}
+			// Hand off to Paystack checkout — the wallet is credited once
+			// /paystack/callback verifies the payment on return.
+			window.location.href = payment.authorization_url;
+			return;
+		}
+
+		const { error: err } = await withdrawWallet(numAmount, accountLast4);
 		loading = false;
 		if (err) {
 			error = err.message;
 			return;
 		}
-		success = mode === 'fund' ? 'Wallet funded successfully.' : 'Withdrawal initiated.';
+		success = 'Withdrawal initiated.';
 		await invalidateAll();
 		setTimeout(close, 900);
 	}
@@ -120,10 +133,12 @@
 				disabled={loading}
 				class="mt-5 w-full rounded-card bg-emerald py-3.5 text-sm font-semibold text-ink disabled:opacity-60"
 			>
-				{loading ? 'Processing…' : mode === 'fund' ? 'Fund Wallet' : 'Withdraw'}
+				{loading ? 'Processing…' : mode === 'fund' ? 'Pay with Paystack' : 'Withdraw'}
 			</button>
 			<p class="mt-3 text-center text-[11px] text-ash-faint">
-				Sandbox mode — this simulates a transfer with no real bank connection yet.
+				{mode === 'fund'
+					? "You'll be redirected to Paystack to complete this payment securely."
+					: 'Sandbox mode — withdrawal simulates a transfer with no real bank connection yet.'}
 			</p>
 		</div>
 	</div>

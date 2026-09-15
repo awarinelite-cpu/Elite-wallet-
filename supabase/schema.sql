@@ -184,6 +184,60 @@ begin
 end;
 $$;
 
+-- ----------------------------------------------------------------------------
+-- Paystack funding
+-- provider_reference ties a wallet credit to a specific Paystack
+-- transaction. The unique constraint is what makes crediting idempotent —
+-- if the same reference is verified twice (user refresh, retry, etc.),
+-- the second attempt cannot create a second credit.
+-- ----------------------------------------------------------------------------
+
+alter table public.transactions
+	add column if not exists provider_reference text unique;
+
+create or replace function public.fund_wallet_paystack(p_amount numeric, p_provider_reference text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_user uuid := auth.uid();
+	v_tx public.transactions;
+begin
+	if v_user is null then
+		raise exception 'Not authenticated';
+	end if;
+	if p_amount is null or p_amount <= 0 then
+		raise exception 'Amount must be greater than zero';
+	end if;
+	if p_provider_reference is null or length(trim(p_provider_reference)) = 0 then
+		raise exception 'Missing provider reference';
+	end if;
+
+	begin
+		update public.wallets
+			set balance = balance + p_amount, updated_at = now()
+			where user_id = v_user;
+
+		insert into public.transactions
+			(user_id, type, amount, status, reference, provider_reference, description)
+		values (
+			v_user, 'fund', p_amount, 'successful', public.generate_reference(),
+			p_provider_reference, 'Wallet Funding · Paystack'
+		)
+		returning * into v_tx;
+
+		return v_tx;
+	exception when unique_violation then
+		-- Already credited for this reference — return the original
+		-- transaction instead of crediting a second time.
+		select * into v_tx from public.transactions where provider_reference = p_provider_reference;
+		return v_tx;
+	end;
+end;
+$$;
+
 create or replace function public.withdraw_wallet(p_amount numeric, p_description text default null)
 returns public.transactions
 language plpgsql
