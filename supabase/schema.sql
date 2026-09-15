@@ -87,33 +87,41 @@ alter table public.spend_records enable row level security;
 
 -- Wallets: users may only ever read their own balance. Writes happen
 -- exclusively through the SECURITY DEFINER functions below.
+drop policy if exists "Users can view their own wallet" on public.wallets;
 create policy "Users can view their own wallet"
 	on public.wallets for select
 	using (auth.uid() = user_id);
 
 -- Transactions: read-only for the owner. All inserts go through RPCs.
+drop policy if exists "Users can view their own transactions" on public.transactions;
 create policy "Users can view their own transactions"
 	on public.transactions for select
 	using (auth.uid() = user_id);
 
 -- Beneficiaries: fully managed by the owner directly from the client.
+drop policy if exists "Users can view their own beneficiaries" on public.beneficiaries;
 create policy "Users can view their own beneficiaries"
 	on public.beneficiaries for select
 	using (auth.uid() = user_id);
+drop policy if exists "Users can add their own beneficiaries" on public.beneficiaries;
 create policy "Users can add their own beneficiaries"
 	on public.beneficiaries for insert
 	with check (auth.uid() = user_id);
+drop policy if exists "Users can delete their own beneficiaries" on public.beneficiaries;
 create policy "Users can delete their own beneficiaries"
 	on public.beneficiaries for delete
 	using (auth.uid() = user_id);
 
 -- Spend records: fully managed by the owner directly from the client.
+drop policy if exists "Users can view their own spend records" on public.spend_records;
 create policy "Users can view their own spend records"
 	on public.spend_records for select
 	using (auth.uid() = user_id);
+drop policy if exists "Users can add their own spend records" on public.spend_records;
 create policy "Users can add their own spend records"
 	on public.spend_records for insert
 	with check (auth.uid() = user_id);
+drop policy if exists "Users can delete their own spend records" on public.spend_records;
 create policy "Users can delete their own spend records"
 	on public.spend_records for delete
 	using (auth.uid() = user_id);
