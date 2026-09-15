@@ -147,6 +147,18 @@ create trigger on_auth_user_created
 	after insert on auth.users
 	for each row execute function public.handle_new_user();
 
+-- Backfill: any auth.users row created before this trigger existed (or from
+-- a run of this file that predates it) has no matching public.wallets row.
+-- Every wallet RPC above does `where user_id = v_user`, which silently
+-- matches zero rows for a user like that instead of erroring — so funding
+-- looked "successful" (the transaction row still got inserted) while the
+-- balance never moved. Safe to re-run: only inserts rows that don't exist.
+insert into public.wallets (user_id, balance)
+select u.id, 0
+from auth.users u
+left join public.wallets w on w.user_id = u.id
+where w.user_id is null;
+
 -- ----------------------------------------------------------------------------
 -- Helpers
 -- ----------------------------------------------------------------------------
@@ -186,6 +198,10 @@ begin
 	update public.wallets
 		set balance = balance + p_amount, updated_at = now()
 		where user_id = v_user;
+
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 
 	insert into public.transactions (user_id, type, amount, status, reference, description)
 	values (v_user, 'fund', p_amount, 'successful', public.generate_reference(), 'Wallet Funding')
@@ -231,6 +247,10 @@ begin
 			set balance = balance + p_amount, updated_at = now()
 			where user_id = v_user;
 
+		if not found then
+			raise exception 'Wallet not found for this user.';
+		end if;
+
 		insert into public.transactions
 			(user_id, type, amount, status, reference, provider_reference, description)
 		values (
@@ -268,6 +288,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -312,6 +335,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -353,6 +379,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -395,6 +424,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -438,6 +470,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -484,6 +519,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
@@ -537,6 +575,9 @@ begin
 	end if;
 
 	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
 	if v_balance < p_amount then
 		raise exception 'Insufficient wallet balance';
 	end if;
