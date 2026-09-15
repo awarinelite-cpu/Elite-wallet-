@@ -4,7 +4,7 @@ import { supabase } from '$lib/supabaseClient';
  * Every wallet-affecting action goes through a Postgres RPC
  * (see supabase/schema.sql) so the balance update and the ledger
  * row are written atomically. Funding, withdrawals, and MTN/Airtel/Glo/
- * 9mobile airtime now call real providers (Paystack, VTpass) via the
+ * 9mobile airtime now call real providers (Paystack, ClubKonnect) via the
  * /api/* routes below; everything else in this sandbox build still just
  * moves numbers around in Postgres until it's wired up the same way.
  */
@@ -89,10 +89,11 @@ export async function transferToWallet({ amount, recipientTag }) {
 }
 
 /**
- * Buys real MTN/Airtel/Glo/9mobile airtime via VTpass — debits the wallet
- * immediately (status 'pending'), then resolves to 'successful' or refunds
- * in the same request, since VTpass's /api/pay responds synchronously.
- * See src/routes/api/vtpass/airtime/+server.js.
+ * Buys real MTN/Airtel/Glo/9mobile airtime via ClubKonnect — debits the
+ * wallet immediately (status 'pending'), then resolves to 'successful' if
+ * ClubKonnect's follow-up query confirms it in the same request, or leaves
+ * it 'pending' for the callback to resolve if ClubKonnect is still
+ * processing. See src/routes/api/clubkonnect/airtime/+server.js.
  */
 export async function buyAirtime({ amount, network, phone }) {
 	const {
@@ -100,7 +101,7 @@ export async function buyAirtime({ amount, network, phone }) {
 	} = await supabase.auth.getSession();
 	if (!session) return { error: { message: 'Not authenticated' } };
 
-	const res = await fetch('/api/vtpass/airtime', {
+	const res = await fetch('/api/clubkonnect/airtime', {
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/json',

@@ -405,9 +405,9 @@ begin
 end;
 $$;
 
--- Superseded by debit_wallet_for_airtime + the /api/vtpass/airtime route,
--- which call the real VTpass API. Left in place only for reference/rollback
--- — the client no longer calls this.
+-- Superseded by debit_wallet_for_airtime + the /api/clubkonnect/airtime
+-- route, which call the real ClubKonnect API. Left in place only for
+-- reference/rollback — the client no longer calls this.
 create or replace function public.pay_airtime(p_amount numeric, p_network text, p_phone text)
 returns public.transactions
 language plpgsql
@@ -545,15 +545,15 @@ end;
 $$;
 
 -- ----------------------------------------------------------------------------
--- VTpass airtime top-ups
+-- ClubKonnect airtime top-ups
 -- Same pending-then-resolve shape as the Paystack payouts below: the debit
 -- happens immediately (status 'pending') so the balance can't be
--- double-spent while the request is in flight at VTpass. The caller
--- resolves it synchronously right after (VTpass's /api/pay responds
--- immediately) via resolve_own_transfer_success on success or
--- reverse_wallet_debit on failure — both already generic over any pending
--- transaction type despite their "transfer" naming, so no separate
--- resolver was needed for this.
+-- double-spent while the request is in flight at ClubKonnect. Unlike
+-- Paystack transfers, ClubKonnect's order API doesn't resolve synchronously
+-- (it only confirms the order was accepted) — the caller queries it once
+-- right away for a fast result via resolve_own_transfer_success /
+-- reverse_wallet_debit, and resolve_airtime_webhook (service_role-only)
+-- picks up anything still pending once ClubKonnect's callback fires.
 -- ----------------------------------------------------------------------------
 
 create or replace function public.debit_wallet_for_airtime(p_amount numeric, p_network text, p_phone text)
@@ -729,6 +729,51 @@ $$;
 revoke all on function public.resolve_transfer_webhook(text, text) from public;
 revoke all on function public.resolve_transfer_webhook(text, text) from anon, authenticated;
 grant execute on function public.resolve_transfer_webhook(text, text) to service_role;
+
+-- Same idea as resolve_transfer_webhook, but for airtime — ClubKonnect's
+-- CallBackURL has no user session either, so this is service_role-only too.
+-- Kept as a separate function (rather than widening resolve_transfer_webhook
+-- to any type) so a bug in one provider's webhook handling can't touch the
+-- other provider's transactions.
+create or replace function public.resolve_airtime_webhook(p_reference text, p_status text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_tx public.transactions;
+begin
+	select * into v_tx from public.transactions
+		where reference = p_reference and type = 'airtime'
+		for update;
+	if not found then
+		raise exception 'Unknown airtime reference: %', p_reference;
+	end if;
+
+	-- Already resolved (duplicate callback delivery, or the initial
+	-- same-request query already settled it) — no-op.
+	if v_tx.status <> 'pending' then
+		return v_tx;
+	end if;
+
+	if p_status = 'successful' then
+		update public.transactions set status = 'successful' where id = v_tx.id returning * into v_tx;
+	else
+		update public.transactions set status = p_status where id = v_tx.id;
+		update public.wallets
+			set balance = balance + v_tx.amount, updated_at = now()
+			where user_id = v_tx.user_id;
+		select * into v_tx from public.transactions where id = v_tx.id;
+	end if;
+
+	return v_tx;
+end;
+$$;
+
+revoke all on function public.resolve_airtime_webhook(text, text) from public;
+revoke all on function public.resolve_airtime_webhook(text, text) from anon, authenticated;
+grant execute on function public.resolve_airtime_webhook(text, text) to service_role;
 
 -- Same-request success resolver — for the rare case Paystack returns a
 -- final 'success' status immediately instead of async via webhook. Scoped
