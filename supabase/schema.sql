@@ -405,6 +405,9 @@ begin
 end;
 $$;
 
+-- Superseded by debit_wallet_for_airtime + the /api/vtpass/airtime route,
+-- which call the real VTpass API. Left in place only for reference/rollback
+-- — the client no longer calls this.
 create or replace function public.pay_airtime(p_amount numeric, p_network text, p_phone text)
 returns public.transactions
 language plpgsql
@@ -534,6 +537,59 @@ begin
 	values (
 		v_user, p_bill_type, p_amount, 'successful', public.generate_reference(),
 		p_provider, p_customer_ref
+	)
+	returning * into v_tx;
+
+	return v_tx;
+end;
+$$;
+
+-- ----------------------------------------------------------------------------
+-- VTpass airtime top-ups
+-- Same pending-then-resolve shape as the Paystack payouts below: the debit
+-- happens immediately (status 'pending') so the balance can't be
+-- double-spent while the request is in flight at VTpass. The caller
+-- resolves it synchronously right after (VTpass's /api/pay responds
+-- immediately) via resolve_own_transfer_success on success or
+-- reverse_wallet_debit on failure — both already generic over any pending
+-- transaction type despite their "transfer" naming, so no separate
+-- resolver was needed for this.
+-- ----------------------------------------------------------------------------
+
+create or replace function public.debit_wallet_for_airtime(p_amount numeric, p_network text, p_phone text)
+returns public.transactions
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+	v_user uuid := auth.uid();
+	v_balance numeric;
+	v_tx public.transactions;
+begin
+	if v_user is null then
+		raise exception 'Not authenticated';
+	end if;
+	if p_amount is null or p_amount <= 0 then
+		raise exception 'Amount must be greater than zero';
+	end if;
+
+	select balance into v_balance from public.wallets where user_id = v_user for update;
+	if not found then
+		raise exception 'Wallet not found for this user.';
+	end if;
+	if v_balance < p_amount then
+		raise exception 'Insufficient wallet balance';
+	end if;
+
+	update public.wallets
+		set balance = balance - p_amount, updated_at = now()
+		where user_id = v_user;
+
+	insert into public.transactions (user_id, type, amount, status, reference, description, counterparty)
+	values (
+		v_user, 'airtime', p_amount, 'pending', public.generate_reference(),
+		p_network || ' Airtime', p_phone
 	)
 	returning * into v_tx;
 

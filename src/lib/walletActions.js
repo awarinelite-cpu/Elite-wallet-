@@ -3,9 +3,10 @@ import { supabase } from '$lib/supabaseClient';
 /**
  * Every wallet-affecting action goes through a Postgres RPC
  * (see supabase/schema.sql) so the balance update and the ledger
- * row are written atomically. In this sandbox build the RPCs just
- * move numbers around in Postgres; swapping in a real BaaS provider
- * later means changing the SQL function bodies, not this file.
+ * row are written atomically. Funding, withdrawals, and MTN/Airtel/Glo/
+ * 9mobile airtime now call real providers (Paystack, VTpass) via the
+ * /api/* routes below; everything else in this sandbox build still just
+ * moves numbers around in Postgres until it's wired up the same way.
  */
 
 export async function fundWallet(amount) {
@@ -87,8 +88,30 @@ export async function transferToWallet({ amount, recipientTag }) {
 	});
 }
 
+/**
+ * Buys real MTN/Airtel/Glo/9mobile airtime via VTpass — debits the wallet
+ * immediately (status 'pending'), then resolves to 'successful' or refunds
+ * in the same request, since VTpass's /api/pay responds synchronously.
+ * See src/routes/api/vtpass/airtime/+server.js.
+ */
 export async function buyAirtime({ amount, network, phone }) {
-	return supabase.rpc('pay_airtime', { p_amount: amount, p_network: network, p_phone: phone });
+	const {
+		data: { session }
+	} = await supabase.auth.getSession();
+	if (!session) return { error: { message: 'Not authenticated' } };
+
+	const res = await fetch('/api/vtpass/airtime', {
+		method: 'POST',
+		headers: {
+			'Content-Type': 'application/json',
+			Authorization: `Bearer ${session.access_token}`
+		},
+		body: JSON.stringify({ amount, network, phone })
+	});
+	const payload = await res.json();
+	if (!res.ok) return { error: { message: payload.error ?? 'Airtime purchase could not be started.' } };
+
+	return { data: payload.transaction };
 }
 
 export async function buyData({ amount, network, phone, bundleLabel }) {
